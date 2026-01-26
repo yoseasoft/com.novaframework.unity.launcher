@@ -25,6 +25,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using UnityEditor;
 using UnityEditor.PackageManager;
 using UnityEngine;
@@ -45,11 +47,20 @@ namespace NovaFramework.Editor.Launcher
             },
         };
 
-        private static string _launcherPackageName = "com.novaframework.unity.test";
+        private static string _launcherPackageName = "com.novaframework.unity.launcher";
 
-        // [InitializeOnLoadMethod]
+        [InitializeOnLoadMethod]
         static void ExecuteInstallation()
         {
+            // 检查Nova.Installer.Editor程序集是否存在
+            if (IsAssemblyExists("Nova.Installer.Editor") && IsAssemblyExists("Nova.Common.Editor"))
+            {
+                
+                Debug.Log("Nova.Installer.Editor assembly already exists. Skipping installation.");
+                Debug.Log("Nova.Common.Editor assembly already exists. Skipping installation.");
+                return; // 如果程序集已存在，则跳过安装
+            }
+            
             Debug.Log("ExecuteInstallation");
 
             try
@@ -75,8 +86,7 @@ namespace NovaFramework.Editor.Launcher
                 {
                     DownloadPackageFromGit(gitVar.Key, gitVar.Value, frameworkRepoPath);
                 }
-
-                // 等待一会儿再移除自身，确保所有操作完成
+                
                 RemoveSelf();
             }
             catch (Exception e)
@@ -180,18 +190,30 @@ namespace NovaFramework.Editor.Launcher
             }
         }
 
-        static void RemoveSelf()
+        private static void RemoveSelf()
         {
             try
             {
                 // 使用 PackageManager 移除自身
                 Client.Remove(_launcherPackageName);
                 Debug.Log($"Successfully removed self: {_launcherPackageName}");
+                // 显示安装完成的消息框
+                EditorUtility.DisplayDialog("安装完成", "NovaFramework Installer 已成功安装！\n等待刷新完成后，按【 F8 】键完成后续安装。", "确定");
             }
             catch (Exception e)
             {
                 Debug.LogError($"Failed to remove self: {e.Message}");
             }
+        }
+        
+        public static bool IsAssemblyExists(string assemblyName)
+        {
+            // 获取当前应用程序域中的所有已加载程序集
+            Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            
+            // 检查是否存在指定名称的程序集
+            return assemblies.Any(assembly => 
+                string.Equals(assembly.GetName().Name, assemblyName, StringComparison.OrdinalIgnoreCase));
         }
     }
 }
