@@ -53,7 +53,7 @@ namespace NovaFramework.Editor.Launcher
         static void ExecuteInstallation()
         {
             // 检查Nova.Installer.Editor程序集是否存在
-            if (IsAssemblyExists("Nova.Installer.Editor") && IsAssemblyExists("Nova.Common.Editor"))
+            if (IsAssemblyExists("NovaEditor.Installer") || IsAssemblyExists("NovaEditor.Common"))
             {
                 
                 Debug.Log("Nova.Installer.Editor assembly already exists. Skipping installation.");

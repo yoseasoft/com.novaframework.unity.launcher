@@ -1,5 +1,5 @@
 {
-    "name": "Nova.Launcher.Editor",
+    "name": "NovaEditor.Launcher",
     "rootNamespace": "",
     "references": [],
     "includePlatforms": [
