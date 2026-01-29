@@ -66,7 +66,12 @@ namespace NovaFramework.Editor.Launcher
 
             // 显示统一安装进度窗口
             _progressWindow = UnifiedInstallProgressWindow.ShowWindow();
+            
+            // 立即设置初始步骤并强制刷新界面
             _progressWindow.SetStep(UnifiedInstallProgressWindow.InstallStep.CheckEnvironment, "检查安装环境...");
+            
+            // 强制刷新界面，确保立即显示内容
+            _progressWindow.Repaint();
             
             // 延迟执行安装，确保UI已渲染
             EditorApplication.delayCall += DoExecuteInstallation;
@@ -277,11 +282,13 @@ namespace NovaFramework.Editor.Launcher
         static void ResolvePackageManagerAndLoadAssembly()
         {
             // 首先强制解析包管理器
+            // 注意：Client.Resolve()是一个异步操作，它本身不返回请求对象
             Client.Resolve();
             
-            // 等待一段时间确保包管理器完成更新
+            // 由于Client.Resolve()是异步的，我们需要等待一段时间以确保包管理器完成更新
+            // 使用计数器和EditorApplication.update来定期检查
             int checkCount = 0;
-            int maxChecks = 30; // 最多检查30次 (30秒)
+            int maxChecks = 60; // 最多检查60次 (30秒)
             
             EditorApplication.update += CheckResolveAndUpdate;
             
@@ -289,17 +296,32 @@ namespace NovaFramework.Editor.Launcher
             {
                 checkCount++;
                 
-                if (checkCount >= maxChecks)
+                // 简单地等待一段时间，然后假设resolve已完成
+                if (checkCount >= 10) // 等待大约10次（每次约50-100毫秒）
                 {
                     // 停止监听更新事件
                     EditorApplication.update -= CheckResolveAndUpdate;
                     
-                    _progressWindow?.AddLog("包管理器解析完成，准备启动AutoInstallManager...");
+                    _progressWindow?.AddLog("包管理器解析等待完成，准备启动AutoInstallManager...");
                     
                     // 延迟一段时间确保程序集完全加载
                     EditorApplication.delayCall += () =>
                     {
                         System.Threading.Thread.Sleep(2000); // 等待2秒确保程序集加载
+                        TryLoadAndStartAutoInstallManager();
+                    };
+                }
+                else if (checkCount >= maxChecks)
+                {
+                    // 即使resolve未完成，也停止等待并尝试启动AutoInstallManager
+                    EditorApplication.update -= CheckResolveAndUpdate;
+                    
+                    _progressWindow?.AddLog("包管理器解析等待超时，但仍准备启动AutoInstallManager...");
+                    
+                    // 延迟一段时间确保程序集尽可能加载
+                    EditorApplication.delayCall += () =>
+                    {
+                        System.Threading.Thread.Sleep(1000); // 等待1秒
                         TryLoadAndStartAutoInstallManager();
                     };
                 }
@@ -309,118 +331,249 @@ namespace NovaFramework.Editor.Launcher
         // 尝试加载并启动AutoInstallManager
         static void TryLoadAndStartAutoInstallManager()
         {
+            _progressWindow?.AddLog("开始尝试加载并启动AutoInstallManager...");
+            
             // 再次刷新确保所有变更都已应用
             AssetDatabase.Refresh();
             
             // 延迟一小段时间让Unity完成程序集编译
-            System.Threading.Thread.Sleep(1000);
+            System.Threading.Thread.Sleep(2000);
             
             // 尝试通过反射调用AutoInstallManager的StartAutoInstall方法
-            var installerAssembly = AppDomain.CurrentDomain.GetAssemblies()
-                .FirstOrDefault(a => a.GetName().Name.Contains("NovaEditor.Installer") || 
-                                   a.GetName().Name.Equals("Assembly-CSharp-Editor", StringComparison.OrdinalIgnoreCase) && 
-                                   a.GetType("NovaFramework.Editor.Installer.AutoInstallManager") != null);
+            Type autoInstallManagerType = null;
             
-            // 如果上面的方法没找到，遍历所有程序集寻找AutoInstallManager
-            if (installerAssembly == null)
+            // 首先尝试直接获取类型
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
-                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                try
                 {
-                    if (assembly.GetType("NovaFramework.Editor.Installer.AutoInstallManager") != null)
+                    // 排除系统程序集，只检查用户相关的程序集
+                    if (assembly.FullName.StartsWith("Nova") || 
+                        assembly.FullName.StartsWith("Assembly-CSharp") || 
+                        assembly.FullName.Contains("Installer"))
                     {
-                        installerAssembly = assembly;
-                        break;
+                        var type = assembly.GetType("NovaFramework.Editor.Installer.AutoInstallManager");
+                        if (type != null)
+                        {
+                            autoInstallManagerType = type;
+                            _progressWindow?.AddLog($"找到AutoInstallManager类型在程序集: {assembly.FullName}");
+                            break;
+                        }
                     }
+                }
+                catch (Exception ex)
+                {
+                    // 忽略无法访问的程序集
+                    continue;
                 }
             }
             
-            if (installerAssembly != null)
+            if (autoInstallManagerType != null)
             {
-                var autoInstallManagerType = installerAssembly.GetType("NovaFramework.Editor.Installer.AutoInstallManager");
-                if (autoInstallManagerType != null)
+                // 首先设置外部进度回调
+                var setExternalProgressCallbacksMethod = autoInstallManagerType.GetMethod("SetExternalProgressCallbacks", 
+                    BindingFlags.Static | BindingFlags.Public);
+                
+                if (setExternalProgressCallbacksMethod != null)
                 {
-                    // 首先设置外部进度回调
-                    var setExternalProgressCallbacksMethod = autoInstallManagerType.GetMethod("SetExternalProgressCallbacks", 
-                        BindingFlags.Static | BindingFlags.Public);
-                    
-                    if (setExternalProgressCallbacksMethod != null)
+                    try
                     {
-                        try
-                        {
-                            // 创建各种回调函数
-                            var stepCallback = new System.Action<int, string>((stepVal, detail) => {
-                                var unifiedStep = MapAutoInstallStepToUnifiedStep(stepVal);
-                                _progressWindow.SetStep(unifiedStep, detail);
-                            });
-                            
-                            var packageProgressCallback = new System.Action<int, int, string>(_progressWindow.SetPackageProgress);
-                            var logCallback = new System.Action<string>(_progressWindow.AddLog);
-                            var errorCallback = new System.Action<string>(_progressWindow.SetError);
-                            
-                            // 调用外部进度设置方法
-                            setExternalProgressCallbacksMethod.Invoke(null, new object[] {
-                                _progressWindow,  // externalProgressWindow
-                                stepCallback,     // setStepCallback
-                                packageProgressCallback, // setPackageProgressCallback
-                                logCallback,      // addLogCallback
-                                errorCallback     // setErrorCallback
-                            });
-                            
-                            _progressWindow.AddLog("已连接到AutoInstallManager进度系统...");
-                        }
-                        catch (Exception ex)
-                        {
-                            string errorMsg = $"Error setting external progress callbacks: {ex.Message}";
-                            _progressWindow.SetError(errorMsg);
-                            Debug.LogError(errorMsg);
-                        }
+                        // 创建各种回调函数
+                        var stepCallback = new System.Action<int, string>((stepVal, detail) => {
+                            var unifiedStep = MapAutoInstallStepToUnifiedStep(stepVal);
+                            _progressWindow.SetStep(unifiedStep, detail);
+                        });
+                        
+                        var packageProgressCallback = new System.Action<int, int, string>(_progressWindow.SetPackageProgress);
+                        var logCallback = new System.Action<string>(_progressWindow.AddLog);
+                        var errorCallback = new System.Action<string>(_progressWindow.SetError);
+                        
+                        // 调用外部进度设置方法
+                        setExternalProgressCallbacksMethod.Invoke(null, new object[] {
+                            _progressWindow,  // externalProgressWindow
+                            stepCallback,     // setStepCallback
+                            packageProgressCallback, // setPackageProgressCallback
+                            logCallback,      // addLogCallback
+                            errorCallback     // setErrorCallback
+                        });
+                        
+                        _progressWindow.AddLog("已连接到AutoInstallManager进度系统...");
                     }
-                    
-                    // 现在调用StartAutoInstall方法
-                    var startAutoInstallMethod = autoInstallManagerType.GetMethod("StartAutoInstall", 
-                        BindingFlags.Static | BindingFlags.Public);
-                    
-                    if (startAutoInstallMethod != null)
+                    catch (Exception ex)
                     {
-                        try
-                        {
-                            _progressWindow.AddLog("正在调用AutoInstallManager.StartAutoInstall方法...");
-                            startAutoInstallMethod.Invoke(null, null);
-                            
-                            _progressWindow.AddLog("AutoInstallManager已启动，进度将同步更新...");
-                        }
-                        catch (Exception ex)
-                        {
-                            string errorMsg = $"Error invoking AutoInstallManager.StartAutoInstall: {ex.Message}";
-                            _progressWindow.SetError(errorMsg);
-                            Debug.LogError(errorMsg);
-                        }
-                    }
-                    else
-                    {
-                        string errorMsg = "AutoInstallManager.StartAutoInstall method not found";
+                        string errorMsg = $"Error setting external progress callbacks: {ex.Message}";
                         _progressWindow.SetError(errorMsg);
                         Debug.LogError(errorMsg);
                     }
                 }
+                
+                // 现在调用StartAutoInstall方法
+                var startAutoInstallMethod = autoInstallManagerType.GetMethod("StartAutoInstall", 
+                    BindingFlags.Static | BindingFlags.Public);
+                
+                if (startAutoInstallMethod != null)
+                {
+                    try
+                    {
+                        _progressWindow.AddLog("正在调用AutoInstallManager.StartAutoInstall方法...");
+                        
+                        // 在调用StartAutoInstall之前，确保包管理器已完全解析
+                        // 这里使用异步方式调用，避免阻塞
+                        EditorApplication.delayCall += () =>
+                        {
+                            try
+                            {
+                                startAutoInstallMethod.Invoke(null, null);
+                                _progressWindow.AddLog("AutoInstallManager已启动，进度将同步更新...");
+                            }
+                            catch (Exception invokeEx)
+                            {
+                                string errorMsg = $"Error invoking AutoInstallManager.StartAutoInstall: {invokeEx.Message}";
+                                _progressWindow.SetError(errorMsg);
+                                Debug.LogError(errorMsg);
+                                Debug.LogError(invokeEx.StackTrace);
+                            }
+                        };
+                    }
+                    catch (Exception ex)
+                    {
+                        string errorMsg = $"Error invoking AutoInstallManager.StartAutoInstall: {ex.Message}";
+                        _progressWindow.SetError(errorMsg);
+                        Debug.LogError(errorMsg);
+                        Debug.LogError(ex.StackTrace);
+                    }
+                }
                 else
                 {
-                    string errorMsg = "AutoInstallManager type not found in loaded assemblies";
+                    string errorMsg = "AutoInstallManager.StartAutoInstall method not found";
                     _progressWindow.SetError(errorMsg);
                     Debug.LogError(errorMsg);
                 }
             }
             else
             {
-                string errorMsg = "NovaEditor.Installer assembly not loaded. Retrying after force refresh...";
+                // 如果找不到类型，尝试强制刷新并再等待一会儿
+                string errorMsg = "NovaFramework.Editor.Installer.AutoInstallManager type not found in loaded assemblies";
                 _progressWindow.AddLog(errorMsg);
                 
                 // 强制刷新并重试
-                AssetDatabase.ImportAsset("Assets"); // 强制刷新整个项目
+                AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+                
+                // 再次等待并尝试
                 EditorApplication.delayCall += () =>
                 {
                     System.Threading.Thread.Sleep(3000); // 等待3秒
-                    TryLoadAndStartAutoInstallManager(); // 重试
+                    _progressWindow?.AddLog("再次尝试加载AutoInstallManager...");
+                    
+                    // 最后再尝试一次
+                    Type finalAutoInstallManagerType = null;
+                    foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        try
+                        {
+                            if (assembly.FullName.StartsWith("Nova") || 
+                                assembly.FullName.StartsWith("Assembly-CSharp") || 
+                                assembly.FullName.Contains("Installer"))
+                            {
+                                var type = assembly.GetType("NovaFramework.Editor.Installer.AutoInstallManager");
+                                if (type != null)
+                                {
+                                    finalAutoInstallManagerType = type;
+                                    break;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            continue;
+                        }
+                    }
+                    
+                    if (finalAutoInstallManagerType != null)
+                    {
+                        var startAutoInstallMethod = finalAutoInstallManagerType.GetMethod("StartAutoInstall", 
+                            BindingFlags.Static | BindingFlags.Public);
+                        
+                        if (startAutoInstallMethod != null)
+                        {
+                            try
+                            {
+                                _progressWindow.AddLog("最终找到了AutoInstallManager，正在调用StartAutoInstall方法...");
+                                startAutoInstallMethod.Invoke(null, null);
+                                _progressWindow.AddLog("AutoInstallManager已启动！");
+                            }
+                            catch (Exception ex)
+                            {
+                                string errorMsg = $"Final attempt - Error invoking AutoInstallManager.StartAutoInstall: {ex.Message}";
+                                _progressWindow.SetError(errorMsg);
+                                Debug.LogError(errorMsg);
+                                Debug.LogError(ex.StackTrace);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // 如果最终还是找不到，尝试手动调用Client.Resolve()后等待
+                        _progressWindow?.AddLog("仍然找不到AutoInstallManager，尝试再次调用Client.Resolve()...");
+                        
+                        EditorApplication.delayCall += () =>
+                        {
+                            Client.Resolve();
+                            System.Threading.Thread.Sleep(3000);
+                            AssetDatabase.Refresh();
+                            
+                            // 最终尝试
+                            Type lastAttemptType = null;
+                            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                            {
+                                try
+                                {
+                                    if (assembly.FullName.StartsWith("Nova") || 
+                                        assembly.FullName.StartsWith("Assembly-CSharp") || 
+                                        assembly.FullName.Contains("Installer"))
+                                    {
+                                        var type = assembly.GetType("NovaFramework.Editor.Installer.AutoInstallManager");
+                                        if (type != null)
+                                        {
+                                            lastAttemptType = type;
+                                            break;
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    continue;
+                                }
+                            }
+                            
+                            if (lastAttemptType != null)
+                            {
+                                var startAutoInstallMethod = lastAttemptType.GetMethod("StartAutoInstall", 
+                                    BindingFlags.Static | BindingFlags.Public);
+                                
+                                if (startAutoInstallMethod != null)
+                                {
+                                    try
+                                    {
+                                        _progressWindow.AddLog("最后尝试成功！正在调用StartAutoInstall方法...");
+                                        startAutoInstallMethod.Invoke(null, null);
+                                        _progressWindow.AddLog("AutoInstallManager已启动！");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        string errorMsg = $"Last attempt - Error invoking AutoInstallManager.StartAutoInstall: {ex.Message}";
+                                        _progressWindow.SetError(errorMsg);
+                                        Debug.LogError(errorMsg);
+                                        Debug.LogError(ex.StackTrace);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                _progressWindow.SetError("无法找到AutoInstallManager，请检查安装过程是否成功完成。");
+                            }
+                        };
+                    }
                 };
             }
         }

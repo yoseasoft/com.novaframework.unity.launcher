@@ -151,6 +151,14 @@ namespace NovaFramework.Editor.Launcher
         public static UnifiedInstallProgressWindow Instance => _instance;
 
         /// <summary>
+        /// 强制重绘窗口
+        /// </summary>
+        public void RepaintWindow()
+        {
+            Repaint();
+        }
+
+        /// <summary>
         /// 重置状态
         /// </summary>
         private void Reset()
